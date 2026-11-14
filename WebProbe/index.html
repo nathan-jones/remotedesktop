@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Desktop browser probe</title>
+<style>
+  :root {
+    --bg: #f5f5f7; --panel: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7;
+    --ok: #1a8f3c; --warn: #b26a00; --fail: #c9271c; --info: #6e6e73; --accent: #0a66d8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000; --panel: #1c1c1e; --text: #f5f5f7; --muted: #a1a1a6; --line: #38383a;
+      --ok: #30d158; --warn: #ffb340; --fail: #ff6961; --info: #a1a1a6; --accent: #4da3ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--text);
+    font: 20px/1.4 -apple-system, system-ui, sans-serif; -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 30px; margin: 0 0 16px; }
+  h2 { font-size: 22px; margin: 32px 0 8px; }
+  p { margin: 8px 0; }
+  .muted { color: var(--muted); font-size: 17px; }
+  #verdict {
+    background: var(--panel); border: 2px solid var(--line); border-radius: 16px;
+    padding: 16px 20px; font-size: 24px; font-weight: 600;
+  }
+  #verdict small { display: block; font-size: 18px; font-weight: 400; color: var(--muted); margin-top: 6px; }
+  #verdict.ok { border-color: var(--ok); } #verdict.warn { border-color: var(--warn); }
+  #verdict.fail { border-color: var(--fail); }
+  .panel { background: var(--panel); border-radius: 16px; padding: 4px 20px; }
+  .row { display: flex; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: flex-start; }
+  .row:last-child { border-bottom: 0; }
+  .dot { flex: none; width: 16px; height: 16px; border-radius: 50%; margin-top: 7px; background: var(--info); }
+  .ok > .dot { background: var(--ok); } .warn > .dot { background: var(--warn); }
+  .fail > .dot { background: var(--fail); }
+  .run > .dot { background: var(--accent); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .body { flex: 1; min-width: 0; }
+  .name { font-weight: 600; }
+  .detail { color: var(--muted); font-size: 17px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  canvas.clip, video.loop {
+    display: block; width: 100%; max-width: 420px; aspect-ratio: 1; margin-top: 10px;
+    border-radius: 10px; background: #000;
+  }
+  button {
+    font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0;
+    border-radius: 12px; padding: 12px 20px; margin: 10px 10px 0 0;
+  }
+  #pad {
+    position: relative; height: 340px; margin-top: 10px; border: 2px dashed var(--line); border-radius: 16px;
+    touch-action: none; user-select: none; -webkit-user-select: none; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; color: var(--muted); text-align: center;
+  }
+  .finger {
+    position: absolute; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%;
+    background: var(--accent); opacity: 0.7; pointer-events: none;
+  }
+  input[type=text] {
+    font: inherit; width: 100%; padding: 12px 14px; margin-top: 10px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  }
+  pre {
+    background: var(--panel); border-radius: 16px; padding: 16px; font-size: 13px; line-height: 1.35;
+    overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Remote Desktop browser probe</h1>
+  <div id="verdict">Running tests…<small>This takes about 20 seconds.</small></div>
+  <p class="muted" id="sent"></p>
+
+  <h2>Video decoding (WebCodecs)</h2>
+  <p class="muted">Each clip is real HEVC from a Mac's hardware encoder, 1088 × 1088 at 60 fps. The Mac's screen sharing stream is HEVC 4:4:4.</p>
+  <div class="panel" id="s-codecs"></div>
+
+  <h2>WebRTC</h2>
+  <div class="panel" id="s-rtc"></div>
+
+  <h2>Other ways to play video</h2>
+  <div class="panel" id="s-media"></div>
+
+  <h2>Browser and screen</h2>
+  <div class="panel" id="s-env"></div>
+
+  <h2>Touch</h2>
+  <p class="muted">Drag one finger around the box, then try two and three fingers at once.</p>
+  <div id="pad">Touch here</div>
+  <div class="panel" id="s-touch" style="margin-top:12px"></div>
+
+  <h2>Keyboard</h2>
+  <p class="muted">Tap the field and type a few letters.</p>
+  <input type="text" id="keys" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type here">
+  <div class="panel" id="s-keys" style="margin-top:12px"></div>
+
+  <h2>Full report</h2>
+  <button id="resend">Send results again</button>
+  <pre id="raw"></pre>
+</main>
+
+<script src="samples.js"></script>
+<script>
+'use strict';
+
+const report = { at: new Date().toISOString(), finished: false, env: {}, webcodecs: {}, webrtc: {}, media: {}, input: {}, keyboard: {} };
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const message = e => (e && (e.message || e.name)) || String(e);
+
+function row(section, name) {
+  const el = document.createElement('div');
+  el.className = 'row';
+  el.innerHTML = '<div class="dot"></div><div class="body"><div class="name"></div><div class="detail"></div></div>';
+  el.querySelector('.name').textContent = name;
+  $(section).appendChild(el);
+  return {
+    body: el.querySelector('.body'),
+    set(status, detail) {
+      el.className = 'row ' + status;
+      el.querySelector('.detail').textContent = detail || '';
+    },
+  };
+}
+
+function bytes(base64) {
+  const text = atob(base64);
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i);
+  return out;
+}
+
+// RFC 6381 / ISO 14496-15 codec string from an hvcC record.
+function codecString(d) {
+  const space = ['', 'A', 'B', 'C'][d[1] >> 6];
+  const tier = (d[1] >> 5) & 1;
+  const profile = d[1] & 0x1f;
+  const compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;
+  let reversed = 0;
+  for (let i = 0; i < 32; i++) reversed = ((reversed << 1) | ((compat >>> i) & 1)) >>> 0;
+  const constraints = Array.from(d.slice(6, 12));
+  while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
+  return 'hvc1.' + space + profile + '.' + reversed.toString(16).toUpperCase() + '.' + (tier ? 'H' : 'L') + d[12] +
+    constraints.map(b => '.' + b.toString(16).toUpperCase()).join('');
+}
+
+const percentile = (values, p) => {
+  if (!values.length) return null;
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+};
+const round = (value, digits = 1) => value == null ? null : Number(value.toFixed(digits));
+
+// ---------------------------------------------------------------- WebCodecs
+
+function runDecoder(clip, config, canvas, frames, paced) {
+  return new Promise(resolve => {
+    const context = canvas.getContext('2d');
+    const submitted = new Map();
+    const latencies = [];
+    let output = 0, firstFrame = null, info = null, maxQueue = 0, error = null, last = null, done = false;
+    const started = performance.now();
+
+    function finish() {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (last) {
+        try { context.drawImage(last, 0, 0, canvas.width, canvas.height); } catch (e) { error = error || 'draw: ' + message(e); }
+        last.close();
+      }
+      try { if (decoder.state !== 'closed') decoder.close(); } catch (e) {}
+      resolve({ output, firstFrame, latencies, info, maxQueue, error, elapsed: performance.now() - started });
+    }
+
+    const decoder = new VideoDecoder({
+      output(frame) {
+        const now = performance.now();
+        output++;
+        if (firstFrame === null) firstFrame = now - started;
+        const sent = submitted.get(frame.timestamp);
+        if (sent !== undefined) { latencies.push(now - sent); submitted.delete(frame.timestamp); }
+        if (!info) info = { format: frame.format, width: frame.displayWidth, height: frame.displayHeight };
+        if (paced) {
+          try { context.drawImage(frame, 0, 0, canvas.width, canvas.height); } catch (e) { error = error || 'draw: ' + message(e); }
+          frame.close();
+        } else {
+          if (last) last.close();
+          last = frame;
+        }
+      },
+      error(e) { error = error || message(e); finish(); },
+    });
+    const timer = setTimeout(() => { error = error || 'timed out after 10 s'; finish(); }, 10000);
+
+    try { decoder.configure(config); } catch (e) { error = message(e); finish(); return; }
+
+    const interval = 1000 / clip.fps;
+    let index = 0;
+    function feed() {
+      const k = index % clip.chunks.length;
+      const timestamp = Math.round(index * 1e6 / clip.fps);
+      submitted.set(timestamp, performance.now());
+      decoder.decode(new EncodedVideoChunk({
+        type: clip.frames[k].key ? 'key' : 'delta', timestamp, duration: Math.round(1e6 / clip.fps), data: clip.chunks[k],
+      }));
+      maxQueue = Math.max(maxQueue, decoder.decodeQueueSize);
+      index++;
+    }
+    const flush = () => decoder.flush().then(finish, e => { error = error || message(e); finish(); });
+
+    if (!paced) {
+      try { while (index < frames) feed(); } catch (e) { error = message(e); finish(); return; }
+      flush();
+      return;
+    }
+    const begin = performance.now();
+    (function tick() {
+      if (done) return;
+      try { while (index < frames && performance.now() - begin >= index * interval) feed(); }
+      catch (e) { error = message(e); finish(); return; }
+      if (index < frames) setTimeout(tick, 2); else flush();
+    })();
+  });
+}
+
+function distinctColours(canvas) {
+  try {
+    const data = canvas.getContext('2d').getImageData(0, Math.floor(canvas.height / 2), canvas.width, 1).data;
+    const seen = new Set();
+    for (let i = 0; i < data.length; i += 4) seen.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+    return seen.size;
+  } catch (e) { return -1; }
+}
+
+async function testClip(clip, ui, canvas) {
+  const result = { label: clip.label, codec: clip.codec, ok: false };
+  report.webcodecs[clip.name] = result;
+  if (!('VideoDecoder' in window)) {
+    result.error = 'VideoDecoder is not available';
+    ui.set('fail', window.isSecureContext ? 'This browser has no WebCodecs video decoder.'
+      : 'WebCodecs is hidden because this page was not loaded over HTTPS.');
+    return result;
+  }
+  ui.set('run', 'Checking ' + clip.codec + '…');
+  const base = { codec: clip.codec, codedWidth: clip.width, codedHeight: clip.height, description: clip.description, optimizeForLatency: true };
+  result.supported = {};
+  for (const mode of ['prefer-hardware', 'no-preference', 'prefer-software']) {
+    try { result.supported[mode] = (await VideoDecoder.isConfigSupported({ ...base, hardwareAcceleration: mode })).supported; }
+    catch (e) { result.supported[mode] = 'error: ' + message(e); }
+  }
+  const config = result.supported['prefer-hardware'] === true ? { ...base, hardwareAcceleration: 'prefer-hardware' } : base;
+  result.hardwareRequested = config.hardwareAcceleration === 'prefer-hardware';
+
+  ui.set('run', 'Decoding as fast as possible…');
+  const burst = await runDecoder(clip, config, canvas, 180, false);
+  result.burst = {
+    framesIn: 180, framesOut: burst.output, error: burst.error, firstFrameMs: round(burst.firstFrame),
+    framesPerSecond: burst.output ? round(burst.output / (burst.elapsed / 1000), 0) : 0, frame: burst.info,
+  };
+  if (burst.error || burst.output === 0) {
+    result.error = burst.error || 'no frames came out';
+    ui.set('fail', 'Cannot decode: ' + result.error + '\nisConfigSupported: ' + JSON.stringify(result.supported));
+    return result;
+  }
+
+  ui.set('run', 'Playing at 60 fps…');
+  const paced = await runDecoder(clip, config, canvas, 120, true);
+  result.paced = {
+    framesIn: 120, framesOut: paced.output, error: paced.error, maxQueue: paced.maxQueue,
+    latencyMs: { median: round(percentile(paced.latencies, 0.5)), p95: round(percentile(paced.latencies, 0.95)), max: round(Math.max(...paced.latencies, 0)) },
+  };
+  result.distinctColours = distinctColours(canvas);
+  result.ok = !paced.error && paced.output >= 110 && result.distinctColours !== 1;
+
+  const lines = [
+    burst.output + ' of 180 frames at full speed: ' + result.burst.framesPerSecond + ' fps, first frame after ' + result.burst.firstFrameMs + ' ms',
+    paced.output + ' of 120 frames at 60 fps: decode delay ' + result.paced.latencyMs.median + ' ms typical, ' +
+      result.paced.latencyMs.p95 + ' ms at the 95th percentile, ' + result.paced.latencyMs.max + ' ms worst',
+    'Frame format ' + (burst.info ? burst.info.format + ' ' + burst.info.width + ' × ' + burst.info.height : 'unknown') +
+      ', ' + (result.hardwareRequested ? 'hardware decoder' : 'decoder chosen by the browser') + ', codec ' + clip.codec,
+  ];
+  if (paced.error) lines.push('Error while playing: ' + paced.error);
+  if (result.distinctColours === 1) lines.push('The picture came out as a single flat colour.');
+  ui.set(result.ok ? (result.burst.framesPerSecond >= 60 ? 'ok' : 'warn') : 'fail', lines.join('\n'));
+  return result;
+}
+
+async function testWebCodecs() {
+  const clips = (window.HEVC_SAMPLES || []).map(clip => {
+    const description = bytes(clip.description);
+    return { ...clip, description, codec: codecString(description), chunks: clip.frames.map(f => bytes(f.data)) };
+  });
+  if (!clips.length) row('s-codecs', 'Test clips').set('fail', 'samples.js did not load.');
+  for (const clip of clips) {
+    const ui = row('s-codecs', clip.label);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'clip';
+    canvas.width = clip.width;
+    canvas.height = clip.height;
+    ui.body.appendChild(canvas);
+    const again = document.createElement('button');
+    again.textContent = 'Run again';
+    let busy = true;
+    again.onclick = async () => { if (busy) return; busy = true; await testClip(clip, ui, canvas); busy = false; conclude(); };
+    ui.body.appendChild(again);
+    try { await testClip(clip, ui, canvas); }
+    catch (e) { report.webcodecs[clip.name] = { label: clip.label, ok: false, error: message(e) }; ui.set('fail', message(e)); }
+    busy = false;
+  }
+  return clips;
+}
+
+// ------------------------------------------------------------------ WebRTC
+
+async function loopback(mime, ui) {
+  const result = { requested: mime };
+  const source = document.createElement('canvas');
+  source.width = source.height = 640;
+  const context = source.getContext('2d');
+  let n = 0;
+  const paint = () => {
+    context.fillStyle = 'hsl(' + (n * 4 % 360) + ' 60% 30%)';
+    context.fillRect(0, 0, 640, 640);
+    context.fillStyle = '#fff';
+    context.font = 'bold 90px sans-serif';
+    context.fillText(mime.split('/')[1] + ' ' + n++, 40, 340);
+  };
+  paint();
+  const painter = setInterval(paint, 33);
+  const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+  try {
+    if (!source.captureStream) throw new Error('canvas.captureStream is not available');
+    const stream = source.captureStream(30);
+    a.onicecandidate = e => e.candidate && b.addIceCandidate(e.candidate).catch(() => {});
+    b.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate).catch(() => {});
+
+    const transceiver = a.addTransceiver(stream.getVideoTracks()[0], { direction: 'sendonly' });
+    const matches = list => ((list && list.codecs) || []).filter(c => c.mimeType.toLowerCase() === mime.toLowerCase());
+    if (transceiver.setCodecPreferences) {
+      let set = false;
+      for (const capabilities of [RTCRtpReceiver.getCapabilities('video'), RTCRtpSender.getCapabilities('video')]) {
+        const wanted = matches(capabilities);
+        if (set || !wanted.length) continue;
+        try { transceiver.setCodecPreferences(wanted); set = true; } catch (e) { result.preferenceError = message(e); }
+      }
+      result.preferenceSet = set;
+    }
+
+    // Unreliable data channel: the transport a gateway could push frames through.
+    let received = 0, receivedBytes = 0, firstAt = 0, lastAt = 0;
+    const channel = a.createDataChannel('probe', { ordered: false, maxRetransmits: 0 });
+    channel.binaryType = 'arraybuffer';
+    b.ondatachannel = e => {
+      e.channel.binaryType = 'arraybuffer';
+      e.channel.onmessage = m => {
+        lastAt = performance.now();
+        if (!received) firstAt = lastAt;
+        received++;
+        receivedBytes += m.data.byteLength || m.data.size || 0;
+      };
+    };
+    channel.onopen = () => {
+      const packet = new Uint8Array(1100);
+      try { for (let i = 0; i < 500; i++) channel.send(packet); } catch (e) { result.dataChannelError = message(e); }
+    };
+
+    const video = document.createElement('video');
+    video.className = 'loop';
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    ui.body.appendChild(video);
+    b.ontrack = e => {
+      video.srcObject = (e.streams && e.streams[0]) || new MediaStream([e.track]);
+      video.play().catch(err => { result.playError = message(err); });
+    };
+
+    await a.setLocalDescription(await a.createOffer());
+    await b.setRemoteDescription(a.localDescription);
+    await b.setLocalDescription(await b.createAnswer());
+    await a.setRemoteDescription(b.localDescription);
+
+    await sleep(4000);
+    result.connection = a.connectionState || a.iceConnectionState;
+    const stats = await b.getStats();
+    stats.forEach(s => {
+      if (s.type !== 'inbound-rtp' || (s.kind || s.mediaType) !== 'video') return;
+      result.framesDecoded = s.framesDecoded || 0;
+      result.framesDropped = s.framesDropped || 0;
+      result.frameSize = (s.frameWidth || '?') + ' × ' + (s.frameHeight || '?');
+      result.decoder = s.decoderImplementation || null;
+      const codec = s.codecId && stats.get(s.codecId);
+      if (codec) result.negotiated = codec.mimeType + (codec.sdpFmtpLine ? ' ' + codec.sdpFmtpLine : '');
+    });
+    result.videoSize = video.videoWidth + ' × ' + video.videoHeight;
+    result.dataChannel = { sent: 500, received, bytes: receivedBytes, spanMs: round(lastAt - firstAt) };
+  } catch (e) {
+    result.error = message(e);
+  } finally {
+    clearInterval(painter);
+    a.close();
+    b.close();
+  }
+  result.ok = !result.error && (result.framesDecoded || 0) > 10;
+  return result;
+}
+
+async function testWebRTC() {
+  const result = report.webrtc = { available: 'RTCPeerConnection' in window };
+  if (!result.available) { row('s-rtc', 'WebRTC').set('fail', 'RTCPeerConnection is not available.'); return; }
+  let receive = null;
+  try { receive = RTCRtpReceiver.getCapabilities('video'); } catch (e) { result.capabilityError = message(e); }
+  result.receiveCodecs = receive ? receive.codecs.map(c => c.mimeType + (c.sdpFmtpLine ? ' ' + c.sdpFmtpLine : '')) : null;
+  const names = receive ? Array.from(new Set(receive.codecs.map(c => c.mimeType.split('/')[1]))) : [];
+  row('s-rtc', 'Codecs it can receive').set(names.includes('H265') ? 'ok' : 'warn',
+    names.length ? names.join(', ') + (names.includes('H265') ? '' : '\nNo H.265, so a WebRTC path would need H.264.') : 'The browser did not say.');
+
+  result.loopback = {};
+  const wanted = names.includes('H265') ? ['video/H265', 'video/H264'] : ['video/H264'];
+  for (const mime of wanted) {
+    const name = mime.split('/')[1];
+    const ui = row('s-rtc', name + ' loopback');
+    ui.set('run', 'Sending a test picture to itself for 4 seconds…');
+    const loop = result.loopback[name] = await loopback(mime, ui);
+    const used = loop.negotiated || 'unknown codec';
+    const usedWanted = used.toLowerCase().indexOf(mime.toLowerCase()) === 0;
+    const data = loop.dataChannel ? '\nData channel: ' + loop.dataChannel.received + ' of 500 packets arrived' : '';
+    if (loop.error) ui.set('fail', loop.error);
+    else ui.set(loop.ok ? (usedWanted ? 'ok' : 'warn') : 'fail',
+      (loop.framesDecoded || 0) + ' frames decoded as ' + used + ', ' + loop.frameSize +
+      (loop.decoder ? ', decoder ' + loop.decoder : '') + data + '\nThis test also needs the device to encode, so a failure here is not conclusive.');
+  }
+}
+
+// --------------------------------------------------------- Media and browser
+
+function testMedia(clips) {
+  const result = report.media;
+  const video = document.createElement('video');
+  const sourceType = window.ManagedMediaSource ? 'ManagedMediaSource' : window.MediaSource ? 'MediaSource' : null;
+  result.mediaSource = sourceType;
+  result.types = {};
+  const lines = [];
+  for (const clip of clips) {
+    const type = 'video/mp4; codecs="' + clip.codec + '"';
+    const entry = result.types[clip.name] = { canPlayType: video.canPlayType(type) };
+    if (sourceType) { try { entry.mediaSource = window[sourceType].isTypeSupported(type); } catch (e) { entry.mediaSource = 'error'; } }
+    lines.push(clip.label + ': ' + (sourceType ? (entry.mediaSource === true ? 'yes' : 'no') : 'n/a') +
+      ' (video tag says "' + (entry.canPlayType || 'no') + '")');
+  }
+  const any = Object.values(result.types).some(t => t.mediaSource === true);
+  row('s-media', 'Streaming into a video tag (' + (sourceType || 'no Media Source') + ')')
+    .set(sourceType ? (any ? 'ok' : 'warn') : 'warn', lines.join('\n') + '\nA fallback only: it adds buffering delay.');
+
+  result.webSocket = 'WebSocket' in window;
+  result.webTransport = 'WebTransport' in window;
+  result.streamingFetch = 'ReadableStream' in window && 'body' in Response.prototype;
+  row('s-media', 'Ways to receive the stream').set(result.webSocket || result.webTransport ? 'ok' : 'fail',
+    'WebSocket: ' + (result.webSocket ? 'yes' : 'no') + '\nWebTransport: ' + (result.webTransport ? 'yes' : 'no') +
+    '\nStreaming fetch: ' + (result.streamingFetch ? 'yes' : 'no'));
+}
+
+function testEnvironment() {
+  const env = report.env;
+  env.userAgent = navigator.userAgent;
+  env.platform = navigator.platform;
+  env.secureContext = window.isSecureContext;
+  env.url = location.origin;
+  env.screen = screen.width + ' × ' + screen.height;
+  env.window = innerWidth + ' × ' + innerHeight;
+  env.pixelRatio = devicePixelRatio;
+  env.maxTouchPoints = navigator.maxTouchPoints;
+  env.cores = navigator.hardwareConcurrency || null;
+  env.standalone = navigator.standalone === undefined ? null : navigator.standalone;
+  env.fullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+  env.wakeLock = 'wakeLock' in navigator;
+  env.offscreenCanvas = 'OffscreenCanvas' in window;
+  env.webgl2 = (() => { try { return !!document.createElement('canvas').getContext('webgl2'); } catch (e) { return false; } })();
+  env.webgpu = 'gpu' in navigator;
+  env.videoFrameCallback = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+  env.pointerEvents = 'PointerEvent' in window;
+  env.touchEvents = 'ontouchstart' in window;
+  env.workers = 'Worker' in window;
+
+  row('s-env', 'Browser').set('info', env.userAgent);
+  row('s-env', 'Secure page (HTTPS)').set(env.secureContext ? 'ok' : 'fail',
+    env.secureContext ? 'Yes' : 'No. WebCodecs only exists on HTTPS pages, so the video results above are not meaningful.');
+  row('s-env', 'Screen').set('info', 'Screen ' + env.screen + ', window ' + env.window + ', pixel ratio ' + env.pixelRatio +
+    '\nReal pixels: ' + Math.round(screen.width * devicePixelRatio) + ' × ' + Math.round(screen.height * devicePixelRatio));
+  row('s-env', 'Touch points').set(env.maxTouchPoints > 0 ? 'ok' : 'warn', String(env.maxTouchPoints));
+  row('s-env', 'Other features').set('info',
+    ['fullscreen', 'wakeLock', 'offscreenCanvas', 'webgl2', 'webgpu', 'workers'].map(k => k + ': ' + (env[k] ? 'yes' : 'no')).join(', ') +
+    ', processor cores: ' + (env.cores || 'unknown'));
+}
+
+// ------------------------------------------------------------ Touch and keys
+
+function watchTouch() {
+  const pad = $('pad');
+  const input = report.input = { downs: 0, moves: 0, cancels: 0, maxTogether: 0, types: [], movesPerSecond: null, coalesced: false, gestureEvents: 0 };
+  const ui = row('s-touch', 'Touch input');
+  ui.set('info', 'Not tried yet.');
+  const active = new Map();
+  let strokeStart = 0, strokeMoves = 0;
+
+  function show() {
+    const good = input.downs > 0 && input.types.includes('touch');
+    ui.set(input.downs === 0 ? 'info' : good ? (input.maxTogether >= 2 ? 'ok' : 'warn') : 'warn',
+      input.downs + ' touches (' + (input.types.join(', ') || 'none') + '), most fingers at once: ' + input.maxTogether +
+      (input.movesPerSecond ? '\nMovement updates: ' + input.movesPerSecond + ' per second' + (input.coalesced ? ' (finer detail available)' : '') : '') +
+      (input.cancels ? '\nThe system took over ' + input.cancels + ' touches (a system gesture).' : '') +
+      (input.downs && input.maxTogether < 2 ? '\nTry two and three fingers.' : ''));
+  }
+  function dot(e) {
+    let el = active.get(e.pointerId);
+    if (!el) { el = document.createElement('div'); el.className = 'finger'; pad.appendChild(el); active.set(e.pointerId, el); }
+    const box = pad.getBoundingClientRect();
+    el.style.left = (e.clientX - box.left) + 'px';
+    el.style.top = (e.clientY - box.top) + 'px';
+  }
+  function lift(e, cancelled) {
+    const el = active.get(e.pointerId);
+    if (el) { el.remove(); active.delete(e.pointerId); }
+    if (cancelled) input.cancels++;
+    if (active.size === 0 && strokeMoves > 5) {
+      const seconds = (performance.now() - strokeStart) / 1000;
+      if (seconds > 0.2) input.movesPerSecond = Math.round(strokeMoves / seconds);
+    }
+    show();
+    queueSend();
+  }
+  pad.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    try { pad.setPointerCapture(e.pointerId); } catch (err) {}
+    if (active.size === 0) { strokeStart = performance.now(); strokeMoves = 0; pad.firstChild.textContent = ''; }
+    input.downs++;
+    if (!input.types.includes(e.pointerType)) input.types.push(e.pointerType);
+    dot(e);
+    input.maxTogether = Math.max(input.maxTogether, active.size);
+    show();
+  });
+  pad.addEventListener('pointermove', e => {
+    if (!active.has(e.pointerId)) return;
+    input.moves++;
+    strokeMoves++;
+    if (e.getCoalescedEvents && e.getCoalescedEvents().length > 1) input.coalesced = true;
+    dot(e);
+  });
+  pad.addEventListener('pointerup', e => lift(e, false));
+  pad.addEventListener('pointercancel', e => lift(e, true));
+  pad.addEventListener('gesturestart', e => { e.preventDefault(); input.gestureEvents++; });
+  pad.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+function watchKeyboard() {
+  const field = $('keys');
+  const keyboard = report.keyboard = { focused: false, keydowns: 0, inputs: 0, lastKeys: [], viewportShrankBy: 0 };
+  const ui = row('s-keys', 'Keyboard input');
+  ui.set('info', 'Not tried yet.');
+  const before = window.visualViewport ? visualViewport.height : innerHeight;
+  function show() {
+    ui.set(keyboard.inputs || keyboard.keydowns ? 'ok' : 'info',
+      'Key events: ' + keyboard.keydowns + ', text changes: ' + keyboard.inputs +
+      (keyboard.lastKeys.length ? '\nLast keys: ' + keyboard.lastKeys.join(' ') : '') +
+      (keyboard.viewportShrankBy > 50 ? '\nAn on-screen keyboard covered ' + keyboard.viewportShrankBy + ' points of the page.' : ''));
+    queueSend();
+  }
+  field.addEventListener('focus', () => { keyboard.focused = true; show(); });
+  field.addEventListener('keydown', e => {
+    keyboard.keydowns++;
+    keyboard.lastKeys.push(e.key);
+    if (keyboard.lastKeys.length > 8) keyboard.lastKeys.shift();
+    show();
+  });
+  field.addEventListener('input', () => { keyboard.inputs++; show(); });
+  if (window.visualViewport) visualViewport.addEventListener('resize', () => {
+    keyboard.viewportShrankBy = Math.max(keyboard.viewportShrankBy, Math.round(before - visualViewport.height));
+    if (keyboard.focused) show();
+  });
+}
+
+// ------------------------------------------------------- Verdict and report
+
+function conclude() {
+  const codecs = report.webcodecs;
+  const works = name => codecs[name] && codecs[name].ok;
+  const fast = name => works(name) && codecs[name].burst.framesPerSecond >= 60;
+  const loops = (report.webrtc && report.webrtc.loopback) || {};
+  const rtc = Object.values(loops).some(l => l.ok);
+  const verdict = $('verdict');
+  let level, title, note;
+  if (works('rext444-8') || works('rext444-10')) {
+    const smooth = fast('rext444-8') || fast('rext444-10');
+    level = smooth ? 'ok' : 'warn';
+    title = smooth ? 'This browser can show the Mac’s stream directly.' : 'This browser decodes the Mac’s stream, but slowly.';
+    note = 'HEVC 4:4:4 decodes here' + (works('rext444-8') && works('rext444-10') ? ' in both 8-bit and 10-bit' : works('rext444-8') ? ' in 8-bit only' : ' in 10-bit only') +
+      ', so a gateway only has to pass the video through.';
+  } else if (works('main420')) {
+    level = 'warn';
+    title = 'Only ordinary HEVC decodes here.';
+    note = 'HEVC 4:2:0 works but 4:4:4 does not. The Mac would have to be asked for 4:2:0, or a gateway would have to re-encode.';
+  } else if (rtc) {
+    level = 'warn';
+    title = 'Only WebRTC video works here.';
+    note = 'WebCodecs cannot decode HEVC in this browser. A gateway would have to re-encode the stream for WebRTC.';
+  } else {
+    level = 'fail';
+    title = 'No working video path was found.';
+    note = window.isSecureContext ? 'Neither WebCodecs nor WebRTC produced a picture.'
+      : 'This page was not loaded over HTTPS, which hides WebCodecs. Open the https:// address instead.';
+  }
+  report.verdict = title;
+  verdict.className = level;
+  verdict.textContent = title;
+  const small = document.createElement('small');
+  small.textContent = note;
+  verdict.appendChild(small);
+}
+
+let sendTimer = null;
+function queueSend() { clearTimeout(sendTimer); sendTimer = setTimeout(send, 1500); }
+async function send() {
+  $('raw').textContent = JSON.stringify(report, null, 2);
+  try {
+    const response = await fetch('report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    $('sent').textContent = 'Results sent to the Mac at ' + new Date().toLocaleTimeString() + '.';
+  } catch (e) {
+    $('sent').textContent = 'Could not send the results back (' + message(e) + '). They are shown at the bottom of this page.';
+  }
+}
+
+(async function main() {
+  $('resend').onclick = send;
+  watchTouch();
+  watchKeyboard();
+  let clips = [];
+  try { testEnvironment(); } catch (e) { report.env.error = message(e); }
+  try { clips = await testWebCodecs(); } catch (e) { report.webcodecs.error = message(e); }
+  try { testMedia(clips); } catch (e) { report.media.error = message(e); }
+  conclude();
+  await send();
+  try { await testWebRTC(); } catch (e) { report.webrtc.error = message(e); }
+  report.finished = true;
+  conclude();
+  await send();
+})();
+</script>
+</body>
+</html>
