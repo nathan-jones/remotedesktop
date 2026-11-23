@@ -233,3 +233,7 @@ HTTPS front end (such as `tailscale funnel`) in front of the server.
   the session; without it the physical display is mirrored.
 - Not implemented yet: audio, clipboard sharing between the device and the Mac,
   multi-tile video, and choosing a session when another user is logged in.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
